@@ -34,6 +34,7 @@ import (
 	"helm.sh/helm/v3/pkg/strvals"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	meta2 "k8s.io/apimachinery/pkg/api/meta"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -348,16 +349,16 @@ func (r *HelmReleaseReconciler) reconcileRelease(ctx context.Context, log logr.L
 	}
 
 	// Check status of any previous release attempt.
-	released := meta.GetCondition(hr.Status.Conditions, v2.ReleasedCondition)
+	released := meta2.FindStatusCondition(hr.Status.Conditions, v2.ReleasedCondition)
 	if released != nil {
 		switch released.Status {
 		// Succeed if the previous release attempt succeeded.
-		case corev1.ConditionTrue:
+		case v1.ConditionTrue:
 			return v2.HelmReleaseReady(hr), nil
-		case corev1.ConditionFalse:
+		case v1.ConditionFalse:
 			// Fail if the previous release attempt remediation failed.
-			remediated := meta.GetCondition(hr.Status.Conditions, v2.RemediatedCondition)
-			if remediated != nil && remediated.Status == corev1.ConditionFalse {
+			remediated := meta2.FindStatusCondition(hr.Status.Conditions, v2.RemediatedCondition)
+			if remediated != nil && remediated.Status == v1.ConditionFalse {
 				err = fmt.Errorf("previous release attempt remediation failed")
 				return v2.HelmReleaseNotReady(hr, remediated.Reason, remediated.Message), err
 			}
@@ -393,7 +394,7 @@ func (r *HelmReleaseReconciler) reconcileRelease(ctx context.Context, log logr.L
 	// If there is a new release revision...
 	if util.ReleaseRevision(rel) > releaseRevision {
 		// Ensure release is not marked remediated.
-		v2.DeleteHelmReleaseCondition(&hr, v2.RemediatedCondition)
+		meta2.RemoveStatusCondition(&hr.Status.Conditions, v2.RemediatedCondition)
 
 		// If new release revision is successful and tests are enabled, run them.
 		if err == nil && hr.Spec.GetTest().Enable {
@@ -402,8 +403,13 @@ func (r *HelmReleaseReconciler) reconcileRelease(ctx context.Context, log logr.L
 
 			// Propagate any test error if not marked ignored.
 			if testErr != nil && !remediation.MustIgnoreTestFailures(hr.Spec.GetTest().IgnoreFailures) {
-				testsPassing := meta.GetCondition(hr.Status.Conditions, v2.TestSuccessCondition)
-				v2.SetHelmReleaseCondition(&hr, v2.ReleasedCondition, corev1.ConditionFalse, testsPassing.Reason, testsPassing.Message)
+				testsPassing := meta2.FindStatusCondition(hr.Status.Conditions, v2.TestSuccessCondition)
+				meta2.SetStatusCondition(&hr.Status.Conditions, v1.Condition{
+					Type:    v2.ReleasedCondition,
+					Status:  v1.ConditionFalse,
+					Reason:  testsPassing.Reason,
+					Message: testsPassing.Message,
+				})
 				err = testErr
 			}
 		}
@@ -473,7 +479,7 @@ func (r *HelmReleaseReconciler) checkDependencies(hr v2.HelmRelease) error {
 			return fmt.Errorf("dependency '%s' is not ready", dName)
 		}
 
-		if c := meta.GetCondition(dHr.Status.Conditions, meta.ReadyCondition); c == nil || c.Status != corev1.ConditionTrue {
+		if !meta2.IsStatusConditionTrue(dHr.Status.Conditions, meta.ReadyCondition) {
 			return fmt.Errorf("dependency '%s' is not ready", dName)
 		}
 	}
@@ -693,12 +699,22 @@ func (r *HelmReleaseReconciler) garbageCollectHelmRelease(logger logr.Logger, hr
 func (r *HelmReleaseReconciler) handleHelmActionResult(hr *v2.HelmRelease, revision string, err error, action string, condition string, succeededReason string, failedReason string) error {
 	if err != nil {
 		msg := fmt.Sprintf("Helm %s failed: %s", action, err.Error())
-		v2.SetHelmReleaseCondition(hr, condition, corev1.ConditionFalse, failedReason, msg)
+		meta2.SetStatusCondition(&hr.Status.Conditions, v1.Condition{
+			Type:    condition,
+			Status:  v1.ConditionFalse,
+			Reason:  failedReason,
+			Message: msg,
+		})
 		r.event(*hr, revision, events.EventSeverityError, msg)
 		return &ConditionError{Reason: failedReason, Err: errors.New(msg)}
 	} else {
 		msg := fmt.Sprintf("Helm %s succeeded", action)
-		v2.SetHelmReleaseCondition(hr, condition, corev1.ConditionTrue, succeededReason, msg)
+		meta2.SetStatusCondition(&hr.Status.Conditions, v1.Condition{
+			Type:    condition,
+			Status:  v1.ConditionTrue,
+			Reason:  failedReason,
+			Message: msg,
+		})
 		r.event(*hr, revision, events.EventSeverityInfo, msg)
 		return nil
 	}
@@ -779,12 +795,12 @@ func (r *HelmReleaseReconciler) recordReadiness(hr v2.HelmRelease, deleted bool)
 		).Error(err, "unable to record readiness metric")
 		return
 	}
-	if rc := meta.GetCondition(hr.Status.Conditions, meta.ReadyCondition); rc != nil {
+	if rc := meta2.FindStatusCondition(hr.Status.Conditions, meta.ReadyCondition); rc != nil {
 		r.MetricsRecorder.RecordCondition(*objRef, *rc, deleted)
 	} else {
-		r.MetricsRecorder.RecordCondition(*objRef, meta.Condition{
+		r.MetricsRecorder.RecordCondition(*objRef, v1.Condition{
 			Type:   meta.ReadyCondition,
-			Status: corev1.ConditionUnknown,
+			Status: v1.ConditionUnknown,
 		}, deleted)
 	}
 }

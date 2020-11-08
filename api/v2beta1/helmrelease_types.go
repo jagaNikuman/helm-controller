@@ -23,6 +23,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	meta2 "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -631,7 +632,7 @@ type HelmReleaseStatus struct {
 
 	// Conditions holds the conditions for the HelmRelease.
 	// +optional
-	Conditions []meta.Condition `json:"conditions,omitempty"`
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
 	// LastAppliedRevision is the revision of the last successfully applied source.
 	// +optional
@@ -684,24 +685,39 @@ func (in HelmReleaseStatus) GetHelmChart() (string, string) {
 // reconciling the given HelmRelease by setting the meta.ReadyCondition to
 // 'Unknown' for meta.ProgressingReason.
 func HelmReleaseProgressing(hr HelmRelease) HelmRelease {
+	hr.Status.Conditions = []metav1.Condition{}
+	meta2.SetStatusCondition(&hr.Status.Conditions, metav1.Condition{
+		Type:    meta.ReadyCondition,
+		Status:  metav1.ConditionUnknown,
+		Reason:  meta.ProgressingReason,
+		Message: "Reconciliation in progress",
+	})
 	resetFailureCounts(&hr)
-	hr.Status.Conditions = []meta.Condition{}
-	SetHelmReleaseCondition(&hr, meta.ReadyCondition, corev1.ConditionUnknown, meta.ProgressingReason, "reconciliation in progress")
 	return hr
 }
 
 // HelmReleaseNotReady registers a failed reconciliation of the given HelmRelease.
 func HelmReleaseNotReady(hr HelmRelease, reason, message string) HelmRelease {
-	SetHelmReleaseCondition(&hr, meta.ReadyCondition, corev1.ConditionFalse, reason, message)
+	meta2.SetStatusCondition(&hr.Status.Conditions, metav1.Condition{
+		Type:    meta.ReadyCondition,
+		Status:  metav1.ConditionFalse,
+		Reason:  reason,
+		Message: message,
+	})
 	hr.Status.Failures++
 	return hr
 }
 
 // HelmReleaseReady registers a successful reconciliation of the given HelmRelease.
 func HelmReleaseReady(hr HelmRelease) HelmRelease {
-	resetFailureCounts(&hr)
+	meta2.SetStatusCondition(&hr.Status.Conditions, metav1.Condition{
+		Type:    meta.ReadyCondition,
+		Status:  metav1.ConditionTrue,
+		Reason:  meta.ReconciliationSucceededReason,
+		Message: "Release reconciliation succeeded",
+	})
 	hr.Status.LastAppliedRevision = hr.Status.LastAttemptedRevision
-	SetHelmReleaseCondition(&hr, meta.ReadyCondition, corev1.ConditionTrue, meta.ReconciliationSucceededReason, "release reconciliation succeeded")
+	resetFailureCounts(&hr)
 	return hr
 }
 
@@ -722,25 +738,6 @@ func resetFailureCounts(hr *HelmRelease) {
 	hr.Status.Failures = 0
 	hr.Status.InstallFailures = 0
 	hr.Status.UpgradeFailures = 0
-}
-
-// SetHelmReleaseCondition sets the given condition with the given status, reason and message
-// on the HelmRelease.
-func SetHelmReleaseCondition(hr *HelmRelease, condition string, status corev1.ConditionStatus, reason, message string) {
-	hr.Status.Conditions = meta.FilterOutCondition(hr.Status.Conditions, condition)
-	hr.Status.Conditions = append(hr.Status.Conditions, meta.Condition{
-		Type:               condition,
-		Status:             status,
-		LastTransitionTime: metav1.Now(),
-		Reason:             reason,
-		Message:            message,
-	})
-}
-
-// DeleteHelmReleaseCondition deletes the given condition of the given HelmRelease
-// if present.
-func DeleteHelmReleaseCondition(hr *HelmRelease, condition string) {
-	hr.Status.Conditions = meta.FilterOutCondition(hr.Status.Conditions, condition)
 }
 
 const (
